@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         FuckYouCSDN
 // @namespace    http://tampermonkey.net/
-// @version      3.0
-// @description  1. 拦截搜索请求，自动添加 -site:csdn.net (从源头绝育) 2. 彻底移除残留垃圾
+// @version      3.2
+// @description  屏蔽CSDN搜索结果（严格域名校验，修复白屏bug）
 // @author       Gemini & User
 // @match        *://www.baidu.com/*
 // @match        *://www.bing.com/*
@@ -10,107 +10,122 @@
 // @match        *://www.google.com/*
 // @match        *://www.google.com.hk/*
 // @match        *://www.google.co.jp/*
-// @icon         https://www.google.com/s2/favicons?sz=64&domain=csdn.net
-// @grant        none
+// @grant        GM_addStyle
 // @run-at       document-start
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // === 配置：你绝不想看见的域名 ===
     const BLOCK_SITE = "csdn.net";
     const BLOCK_QUERY = ` -site:${BLOCK_SITE}`;
 
-    // === 模块一：输入劫持 (主动进攻) ===
-    // 在你按下回车或点击搜索按钮的瞬间，修改你的搜索词
+    // === 注入 CSS 样式 (保持 CSS 隐藏模式) ===
+    const css = `
+        .fuck-csdn-hide {
+            display: none !important;
+            visibility: hidden !important;
+            height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+        }
+    `;
+    if (typeof GM_addStyle !== "undefined") {
+        GM_addStyle(css);
+    } else {
+        const style = document.createElement('style');
+        style.textContent = css;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    // === 模块一：输入劫持 (保持不变) ===
     function hijackInput() {
-        // 针对各大搜索引擎的输入框选择器
         const inputSelectors = [
             'input[id="kw"]',       // 百度
             'input[id="sb_form_q"]',// 必应
             'input[name="q"]',      // Google
-            'textarea[name="q"]'    // Google 新版可能用 textarea
+            'textarea[name="q"]'
         ];
 
         inputSelectors.forEach(selector => {
             const input = document.querySelector(selector);
             if (input) {
-                // 监听键盘回车
                 input.addEventListener('keydown', (e) => {
-                    if (e.key === 'Enter') {
-                        appendBlockQuery(input);
-                    }
+                    if (e.key === 'Enter') appendBlockQuery(input);
                 });
-
-                // 监听整个表单的提交事件 (防止用户点击放大镜图标搜索)
                 const form = input.closest('form');
                 if (form) {
-                    form.addEventListener('submit', () => {
-                        appendBlockQuery(input);
-                    });
+                    form.addEventListener('submit', () => appendBlockQuery(input));
                 }
             }
         });
     }
 
-    // 辅助函数：给搜索词加上 -site:csdn.net
     function appendBlockQuery(inputElement) {
         let val = inputElement.value;
-        // 如果已经加过了，就不要重复加
-        if (val && !val.includes(BLOCK_QUERY) && !val.includes(`-site:${BLOCK_SITE}`)) {
+        if (val && !val.includes(BLOCK_SITE)) {
             inputElement.value = val + BLOCK_QUERY;
         }
     }
 
-    // === 模块二：DOM 焚烧 (被动防御) ===
-    // 即使漏网之鱼出现，也直接从源码中删除
-    function incinerateGarbage() {
-        // 1. 链接检测
-        const links = document.querySelectorAll(`a[href*="${BLOCK_SITE}"]`);
-        links.forEach(link => {
-            nukeNode(link);
-        });
+    // === 模块二：结果隐藏 (核心修正) ===
+    function hideGarbage() {
+        // 1. 初步筛选：查找所有 href 包含 csdn 的链接
+        const links = document.querySelectorAll(`a[href*="${BLOCK_SITE}"]:not(.fuck-csdn-processed)`);
 
-        // 2. 文本来源检测 (针对百度的“来源：CSDN博客”)
-        // 查找包含 CSDN 字样的小标签
-        const texts = document.querySelectorAll('span, div, p, cite');
-        texts.forEach(el => {
-             // 限制长度防止误删正文，只杀来源标注
-            if (el.innerText && el.innerText.length < 50 && /CSDN/i.test(el.innerText)) {
-                nukeNode(el);
+        links.forEach(link => {
+            link.classList.add('fuck-csdn-processed'); // 标记已处理
+
+            // === 核心修复步骤 ===
+            // 必须校验 hostname，防止误伤搜索引擎内部带有 "-site:csdn.net" 参数的链接
+            // link.hostname 会自动解析域名，如 "blog.csdn.net" 或 "www.bing.com"
+            if (link.hostname && link.hostname.includes(BLOCK_SITE)) {
+                hideNode(link);
             }
         });
     }
 
-    // 核心毁灭函数：找到最大的结果容器并删除
-    function nukeNode(element) {
+    function hideNode(element) {
+        // 定义精确的结果容器选择器
         const resultContainers = [
             '.result', '.c-container', '.result-op', // 百度
-            '.b_algo', '.b_ans', 'li.b_algo',        // 必应
+            '.b_algo', 'li.b_algo', '.b_ans',        // 必应 (注意：.b_ans 有时用于问答卡片)
             '.g', '.MjjYud', 'div[data-hveid]'       // Google
         ];
 
+        // 向上查找最近的匹配容器
         for (let selector of resultContainers) {
             const container = element.closest(selector);
             if (container) {
-                container.remove(); // 注意：这里是 remove()，彻底删除节点，不再是 hidden
-                console.log('已焚烧一条CSDN垃圾');
+                container.classList.add('fuck-csdn-hide');
+                // 找到一个容器后立即返回，避免继续向上查找误伤更大的父容器
                 return;
             }
         }
     }
 
     // === 执行逻辑 ===
-
-    // 1. 页面加载完成后，挂载输入劫持监听器
     window.addEventListener('DOMContentLoaded', hijackInput);
-
-    // 2. 启动定时清理 (应对动态加载)
-    const observer = new MutationObserver(() => {
-        incinerateGarbage();
-        // 动态加载出来的输入框也要重新劫持
+    window.addEventListener('load', () => {
         hijackInput();
+        hideGarbage(); // load 时再执行一次彻底清理
+    });
+
+    const observer = new MutationObserver((mutations) => {
+        let shouldScan = false;
+        for(let mutation of mutations) {
+            if (mutation.addedNodes.length > 0) {
+                shouldScan = true;
+                break;
+            }
+        }
+        if(shouldScan) {
+            hideGarbage();
+            hijackInput();
+        }
     });
 
     observer.observe(document.documentElement, { childList: true, subtree: true });
